@@ -1,0 +1,682 @@
+#!/usr/bin/env bash
+#
+# TODO: Write file header
+#
+# TODO: pacman parallel downloads
+# TODO: makepkg optimisations
+# TODO: create /etc/systemd/sleep.conf.d/disable-sleep.conf
+# [Sleep]
+# AllowSuspend=no
+# AllowHibernation=no
+#
+# TODO: add kernel parameters
+# iommu=pt
+# nvidia_drm.modeset=1
+# nvidia_drm.fbdev=1
+#
+# TODO: add module parameters
+# NVreg_UsePageAttributeTable=1
+# NVreg_EnableStreamMemOPs=1
+# NVreg_EnablePCIeGen3=1
+# NVreg_EnableMSI=1
+#
+# TODO: target systemctl
+# systemctl enable ... --root=/mnt
+# TODO: rsync for boot backup hook on system upgrade
+# TODO: incase i need to run sudo for user
+# echo '%wheel ALL=(ALL:ALL) NOPASSWD: ALL' > /etc/sudoers.d/wheel_sudo
+# echo '%wheel ALL=(ALL:ALL) ALL' > /etc/sudoers.d/wheel_sudo
+#      cuda (NVIDIA)
+#        gdb
+#        glu
+#        nvidia-utils
+#        rdma-core
+# 
+
+shopt -s nullglob
+export LANG=C
+export LC_ALL=C
+readonly CACHE_DIR="${XDG_CACHE_HOME:=${HOME}/.cache}/ligmarch"
+readonly MIRRORGEN_URL="https://archlinux.org/mirrorlist/"
+declare -A {simple,multi,nested,form}_set
+declare -a opt_tree_root window_stack
+mkdir -p ${CACHE_DIR}
+#readonly LIG_TMPDIR=$(mktemp -d)
+#cd ${LIG_TMPDIR}
+#LIG_OPT=(keymap locale timezone mirrors device {host,user}name packages save install)
+#[[ ${0%/*} == ${0} ]]\
+#&& readonly LIG_SRCDIR=${OLDPWD}\
+#|| readonly LIG_SRCDIR=${0%/*}
+
+nap() {
+  ((fd_nap)) || exec {fd_nap}<> <(:)
+  read -t ${1:-0.1} -u $fd_nap || :
+}
+
+setty() {
+  stty_prev=$(stty -g)
+  stty -echo -icanon -ixon isig susp undef
+  printf '\x1B)U\x1B(K\x0E\x9B?25;7l\x9B31m'
+}
+
+resetty() {
+  printf '\x9B2J\x9Bm\x9B?25;7h\x1B)K\x0F'
+  stty "$stty_prev"
+}
+
+die() {
+  trap - EXIT
+  resetty
+  : "${BASH_SOURCE[1]}: line ${BASH_LINENO[0]}: ${FUNCNAME[1]}: ${1:-Died}"
+  printf '%s\n' "$_" >&2
+  exit 1
+}
+
+add_to_set() {
+  [[ $(type -t "$2") == function ]] || declare -g "$1_set[$2]"=1
+}
+
+add_option() {
+  add_to_set "$@"
+  opt_tree_root+=("$2")
+  [[ "$1" == simple || "$1" == multi ]] && IFS=$'\n' read -d '' -a "$2"
+}
+
+cache_country_codes() {
+  exec {html}<> <(curl -s "${MIRRORGEN_URL}")
+  until [[ "$REPLY" =~ \<select.*country.*\> ]]; do read -u ${html}; done
+	while read -u ${html}; do # Write to file and Handle quirks for multibyte chars
+		[[ "$REPLY" == *\</select\>* ]] && break
+		[[ "$REPLY" =~ ([A-Z]{2}).*\>(.*)\< ]] || continue
+    case "${BASH_REMATCH[1]}" in
+      TR) : 'TR Turkey';;
+      RE) : 'RE Reunion Island';;
+      *) : "${BASH_REMATCH[*]:1}";;
+    esac
+    printf '%s\n' "$_"
+	done > "${CACHE_DIR}/country_codes"
+  exec {html}>&-
+}
+
+fetch_mirrorlist() {
+  [[ -f "${cachedir}/country_codes" ]] || cache_country_codes &
+  exec {dump_stream}<> <(curl -s "${MIRRORGEN_URL}all/https/")
+  until [[ "$REPLY" =~ ^'## Worldwide' ]]; do read -u ${dump_stream}; done
+  while read -t 0 -u ${dump_stream} && read -u ${dump_stream}; do
+    [[ "$REPLY" != '##'* ]] && continue || : "${REPLY#* }"
+    [[ "$_" == T$'\xC3\xBC'rkiye ]] && : "Turkey"
+    printf '%s\n' "$_"
+  done
+  exec {dump_stream}>&-
+}
+
+fetch_devices() {
+  for dev in /sys/block/{sd,hd,nvme,mmcblk}*;{
+    printf '/dev/%s \xF7 ' ${dev##*/}
+    : $(($(<"$dev/size") * 5120>>30))
+    printf '%s.%cGib\n' ${_:: -1} ${_: -1}
+  }
+}
+
+fetch_locales() {
+  while read; do printf %s\\n "${REPLY%% *}"; done < "/usr/share/i18n/SUPPORTED"
+}
+
+add_firstboot_options() {
+  add_option simple Keymap < <(localectl list-keymaps)
+  add_option simple Locale < <(fetch_locales)
+  add_option simple Timezone < <(timedatectl list-timezones)
+}
+
+display_cleave() {
+  local fissure i lim
+  fissure=$(echoes '\xC4' $((COLUMNS-2)))
+  # Place cursor on transverse plane
+  printf '\x9B%s;H' $TRANSVERSE
+  # Grow fissure from from saggital plane laterally along transverse plane
+  ((i=-1,lim=SAGITTAL-1))
+  for((i;++i<lim;)){
+    printf '\x9B%sG\xCD' $((SAGITTAL-i)) $((SAGITTAL+i+!(COLUMNS&1)))
+    nap 0.002
+  }
+  # Ligate fissure
+  echoes '\xCE\x0D' 2 && nap 0.075
+  # Pilot cleavage and swap ligatures
+  printf '\xD0%b' $fissure '\n'
+  printf '\xD2%b' $fissure '\x9BA\x0D'
+  ((i=0,lim=(TRANSVERSE>>2)-(LINES&1)))
+  # Widen pilot cleave if lines are odd
+  # A M B L: up  delete_line  down  insert_line
+  printf '\x9B%s;%sr\x9B%s;H' 2 $((TRANSVERSE+(2*lim)+(LINES&1))) $TRANSVERSE
+  ((LINES&1)) && printf '\x9B%s' {A,M,B,L,A}
+  # Continue widening
+  for((i;i++<lim;)){ printf '\x9B%s' {A,M,B,2L,A}; nap 0.015;}
+  printf '\x9Br'
+}
+
+draw_window()
+{
+	local y=$1 x=$2 m=$3 n=$4 blanks=
+	printf -v blanks '%*s' $((m > n ? m : n)) ''
+	: "${blanks::$((n - 2))}"
+	: "${_// /$'\xCD'}"
+	# Position cursor, print top and bottom borders
+	printf '\x9B%s;%sH\xC9%s\xBB' $y $x "$_"
+	printf '\x9B%s;%sH\x1B7\xC8%s\xBC\x1B8\x9BA' $((y + m - 1)) $x "$_"
+	# Print vertical borders, bring cursor into window, save cursor state
+	: "${blanks::$((m - 2))}"
+	: "${_// /$'\x1B7\xBA'${blanks::$((n - 2))}$'\xBA\x1B8\x9BA'}"
+	printf '%s\x1B8\x9BC\x1B7' "$_"
+}
+
+exit_prompt()
+{
+  local exit_query exit_opts
+  [[ ${FUNCNAME[1]} == 'exit_prompt' ]] && return
+  exit_query='Abort setup process'; exit_opts=('(Y|y)es' '(N|n)o')
+  [[ "${1:-}" == 'config' ]] && exit_query="Config error: ${exit_query}"
+  win_ctx_op 'push'
+  display_cleave
+  # Center cursor
+  printf '\x9B%s;%sH' $((TRANSVERSE-(LINES&1))) $SAGITTAL
+  # Pad strings if columns are odd
+  ((COLUMNS&1)) && { exit_query+=' '; exit_opts[0]+=' ';}
+  # Finalise query and concatenate option strings
+  exit_query+='?'; exit_opts="${exit_opts[0]}   ${exit_opts[1]}"
+  # Center and print query and option strings based on length
+  printf '\x9B%sD%s' $(((${#exit_query}>>1)-!(COLUMNS&1))) "$exit_query"
+  printf '\x9B%s' ${SAGITTAL}G 2B
+  printf '\x9B%sD%s' $(((${#exit_opts}>>1)-!(COLUMNS&1))) "$exit_opts"
+  # Infinite loop for confirmation
+  for((;;)){
+    read ${READ_OPTS[@]} -N1
+    # Continue loop if timed out
+    (($?>128)) && continue
+    case "$REPLY" in
+      Y|y) exit 0;;
+      N|n) break;;
+    esac
+  }
+  win_ctx_op 'pop'
+}
+
+get_console_size()
+{
+	((OPT_TEST)) || read -r LINES COLUMNS < <(stty size)
+	TRANSVERSE='(LINES+1)>>1'
+	SAGITTAL='(COLUMNS+1)>>1'
+	((${#window_stack[@]})) && {
+		: "${window_stack[0]%:*:*}"
+		window_stack[0]="main_keylist:1:1:${window_stack[0]/$_/$LINES:$COLUMNS}"
+		for ((i=0;++i<${#window_stack[@]};));{ :;}
+	}
+}
+
+get_key()
+{
+	local -n ref=$1
+	for((;;)){
+		read ${READ_OPTS[@]} -N1 ref
+		# Handling timeouts
+		(($?>128))\
+			&& continue
+		# Handling escape and CSI characters
+		[[ $ref == $'\x1B' ]] && {
+			read ${READ_OPTS[@]} -N1
+			[[ "${REPLY}" != "[" ]]\
+				&& return
+			read ${READ_OPTS[@]} -N2
+			ref=$'\x9B'${REPLY}
+		}
+		return
+	}
+}
+
+print_pg()
+{
+  local i y x m n lim offs
+  local -n w ref
+  local white_sp
+  w=win_ctx; ref=${w[nref]}; offs=${w[offset]}
+  read -d '' y x m n <<< "${w[attr]//,/ }"
+  ((m-=2,n-=2))
+  ((lim=offs+m<${#ref[@]}?offs+m:${#ref[@]}))
+  wipe_window
+  # Populate page
+  case ${w[pg_type]} in
+    'single')
+        for((i=offs-1;++i<lim;)){ printf '\x1B7  %s\x1B8\x9BB' "${ref[$i]}";}
+        printf '\x9B%sA\x1B7  ' $((i-=w[idx]))
+        : "${ref[$((lim-i))]}"
+      # Move cursor up to selection and print highlighted selection
+      printf '\x9B7m%s\x1B8' "$_"
+    ;;
+    'multi')
+      ((i=offs-1))
+      for((i;++i<lim;)){ printf '\x1B7  < > %s\x1B8\x9BB' "${ref[$i]}";}
+      printf '\x9B%s;%sH\x1B7' $y $((x+1))
+      for i in ${w[idxs]//,/ };{
+        ((i<offs||i>lim)) && continue
+        printf '\x9B%sB  <\x04>\x1B8' $((i-offs+1))
+      }
+      i=${w[idx]}
+      printf '\x9B%sB\x1B7\x9B6C\x9B7m%s\x1B8' $((i-offs+1)) "${ref[$i]}"
+    ;;
+  esac
+  # Don't print cursor indicator if argument provided
+  [[ "${1:-}" == 'nocurs' ]] || printf '\xAF\x9BD'
+}
+
+push_window()
+{
+	[[ $(get_wintype $1) != form ]] && {
+		((${#window_stack[@]})) && {
+			local -n ref=${1}_strs
+			local -i lines="${#ref[@]} < LINES - 4 ? ${#ref[@]} + 2 : LINES - 2"
+			local -i columns='SAGITTAL - 1'
+			window_stack[-1]="${window_stack[-1]%:*:*}:$pg_idx:$pg_off"
+			window_stack+=("${1}:2:${SAGITTAL}:${lines}:${columns}:0:0")
+		} || {
+			window_stack=("main_keylist:1:1:${LINES}:${COLUMNS}:0:0")
+		}
+	} || {
+		:
+	}
+	update_pg_info
+	draw_window
+}
+
+test_size() {
+  # Temp vars as invoking stty overrides values for LINES and COLUMNS
+  local -a dim
+  OPT_TEST=1
+  read -ra dim -p 'Enter display size in {LINES} {COLUMNS} (ex: 25 80): '
+ setup_console 
+  !((${dim[0]})) || !((${dim[1]})) && die 'Parse Error'
+  LINES=${dim[0]}; COLUMNS=${dim[1]}
+  return 0
+}
+
+prompt() {
+  local str white_sp i
+  white_sp=$(echoes '\x20' 65)
+  case $1 in
+    'err')
+      printf '%s\x1B8' "$white_sp"
+      for((i=0;i++<9;)){
+        ((i&1)) && printf '\x9B7m'
+        printf '%s\x1B8' "$2"; nap 0.07
+        read ${READ_OPTS[@]}
+      }
+    ;;
+    'new')
+      printf '  %s\x1B8\x9BB  %s\x1B8\x9B2B' "$white_sp" "$white_sp"
+      printf '  %s\x1B8' "$white_sp"
+      : "${win_ctx[offset]}"
+      printf '\xAF ENTER DESIRED %s\x1B8\x9BB' "${SETOPT_KEYS[$_]//_/ }"
+      printf '  \x1B7\x9BB\x9BD:\x9B7m \x1B8' 
+    ;;
+    'update')
+      printf '%s\x1B8\x9BB' "$white_sp" "$white_sp"
+      : "${SETOPT_KEYS[${win_ctx[offset]}]}"
+      str="${win_ctx[nref]}"
+      ((i=${win_ctx[idx]}))
+      printf '%s\x9B7m' "${str::${idx}}"
+      ((idx==${#str})) && printf ' \x1B8' ||
+        printf '%s\x9B27m%s\x1B8' "${str:${idx}:1}" "${str:$((idx+1))}"
+    ;;
+  esac
+}
+
+handle_event_enter()
+{
+	[[ ${pg_ref} == main_keylist ]] && {
+		: "$(get_wintype ${main_keylist[${pg_idx}]})"
+		case $_ in
+		*'_select')
+			push_window
+			update_pg_info
+			print_pg
+		;;
+		esac
+	}
+}
+
+seq_ttin() {
+  local -n str idx
+  local optkey key strcomp lim
+  win_ctx_op 'push'
+  win_ctx_op 'set' "2,$((COLUMNS-70)),5,69;__;prompt"
+  str=win_ctx[nref]; idx=win_ctx[idx]; win_ctx[offset]=$1
+  optkey=${SETOPT_KEYS[$1]}; str=''; strcomp=''
+  case $optkey in 'ESP'|'USERNAME') : 32;; 'HOSTNAME') : 64;; *) : 0;;esac
+  ((idx=0,lim=$_))
+  draw_window
+  prompt 'new'
+  for((;;)){
+    get_key key
+    case $key in
+      $'\x0A') # ENTER
+        [[ -z "$str" ]] && { prompt 'err' "NO INPUT RECEIVED"; continue;}
+        case $optkey in
+          'USERNAME')
+            [[ "$str" =~ .*[$].*.$ ]] && {
+              prompt 'err' "'$' ONLY VALID AS LAST CHARACTER"; continue;}
+          ;;&
+          ESP*|*VOLUME_SIZE)
+            ! [[ "$str" =~ ^([1-9][0-9]*)G(iB)?$ ]] && {
+              prompt 'err' "VALID SPECIFIERS: [:digit:]G(iB)"; continue;}
+            str="${BASH_REMATCH[1]}GiB"
+          ;;&
+          *) : "$str";;
+        esac
+        setopt_pairs_f[$1]="${SETOPT_KEYS_F[$1]}${_}"
+        setopt_pairs[$optkey]="$str"
+      ;&
+      $'\x1B') win_ctx_op 'pop'; return;; # ESC
+      $'\x9BD') ((idx>0)) && ((idx--));; # LEFT
+      $'\x9BC') : "$str"; ((idx<${#_})) && ((idx++));; # RIGHT
+      $'\x7F') # BACKSPACE
+        : "$str"; ((${#_}&&idx)) && str="${_::$((idx-1))}${_:$((idx--))}";;
+      $'\x9B3~') # DEL
+        : "$str"; ((idx<${#_})) && str="${_::${idx}}${_:$((idx+1))}";;
+      $'\x9B1~') ((idx=0));; # HOME
+      $'\x9B4~') : "$str"; ((idx=${#_}));; # END
+      *)
+        # Broad key validation: if failed, print warning and flush input buffer
+        [[ "${key}" =~ ^[[:alnum:][:punct:]]$ ]] || {
+          prompt 'err' 'INVALID KEY'; continue;}
+        # String length validation
+        : "$str"; ((lim&&${#_}>=lim)) && {
+          prompt 'err' "${lim} CHARACTER LIMIT"; continue;}
+        # Regex validation for valid patterns
+        case $optkey in
+          'HOSTNAME')
+            ((!idx)) && {
+              [[ "${key}" =~ [a-z0-9] ]] || {
+                prompt 'err' 'VALID 1ST CHARACTERS: [a-z,0-9]'; continue;}
+            } || {
+              [[ "${key}" =~ [a-z0-9-] ]] || {
+              prompt 'err' 'VALID CHARACTERS: [a-z,0-9,-]'; continue;}
+	    }
+          ;;
+          'USERNAME')
+            ((!idx)) && {
+              [[ "${key}" =~ [[:alpha:]_] ]] || {
+                prompt 'err' 'VALID 1ST CHARACTERS: [a-z,A-Z,_]'; continue;}
+            } || {
+              [[ "${key}" =~ [[:alpha:]_\$-] ]] || {
+                prompt 'err' 'VALID CHARACTERS: [a-z,A-Z,_,-,$]'; continue;}
+            }
+          ;;
+        esac
+        str="${str::${idx}}${key}${str:$((idx++))}"
+      ;;
+    esac
+    prompt 'update'
+  }
+}
+
+loop_ui()
+{
+	local -- key
+	print_pg
+	for((;;)){
+		get_key key
+		case $key in
+		'q' |\
+		$'\x1B') # ESC
+			[[ ${pg_ref} == main_keylist ]]\
+				&& exit_prompt\
+				|| return 0
+		;;
+		$'\x0A') # ENTER
+			handle_event_enter
+		;;
+		'k' |\
+		$'\x9BA') # UP
+			((!pg_idx)) &&
+				continue
+			((pg_idx == pg_off)) && {
+				((pg_off--))
+				((pg_idx--))
+				print_pg
+				continue
+			}
+		;;
+		'j' |\
+		$'\x9BB') # DOWN
+			((pg_idx + 1 == pg_arr_len)) && continue
+			((pg_idx + 1 == pg_off + pg_lines)) && {
+				((pg_off++))
+				((pg_idx++))
+				print_pg
+				continue
+			}
+		;;
+    #  ^B   |  PG_UP
+		$'\x02' |  $'\x9B5~')
+			pg_off='pg_off - pg_lines > 0 ? pg_off - pg_lines : 0'
+			pg_idx='pg_idx - pg_lines > 0 ? pg_idx - pg_lines : 0'
+		;;&
+		$'\x15') # HALF_PG_UP(CTRL+U)
+			pg_idx='pg_idx - pg_stop > 0 ? pg_idx - pg_stop : 0'
+			((pg_idx < pg_off))\
+				&& pg_off=pg_idx
+		;;&
+    #  ^F   | PG_DOWN
+		$'\x06' | $'\x9B6~') 
+			((pg_off + pg_lines < pg_arr_len - pg_lines))\
+				&& pg_off+=pg_lines\
+				|| pg_off='pg_arr_len > pg_lines ? pg_arr_len - pg_lines : 0'
+			pg_idx='pg_idx + pg_lines < pg_arr_len ? pg_idx + pg_lines : pg_arr_len - 1'
+		;;&
+		$'\x04') # HALF_PG_DOWN(CTRL+D)
+			pg_idx='pg_idx + pg_stop < pg_arr_len ? pg_idx + pg_stop : pg_arr_len - 1'
+			((pg_idx + 1 > pg_off + pg_lines))\
+				&& pg_off='pg_idx - pg_lines + 1'
+		;;&
+		$'\x9B1~') # HOME
+			pg_off=0
+			pg_idx=0
+		;;&
+		$'\x9B4~') # END
+			pg_off='pg_arr_len > pg_lines ? pg_arr_len - pg_lines : 0'
+			pg_idx='pg_arr_len - 1'
+		;;&
+		$'\x02'|$'\x04'|$'\x06'|$'\x15'|$'\x9B1~'|$'\x9B4~'|$'\x9B5~'|$'\x9B6~')
+			print_pg
+		;;
+		esac
+	}
+}
+
+nav_multi() {
+  local -n ref idx offs
+  local key len lim slim
+  ref=${win_ctx[nref]}; idx=win_ctx[idx]; offs=win_ctx[offset]; len=${#ref[@]}
+  read -d '' _ _ lim _ <<< "${win_ctx[attr]//,/ }"
+  ((lim-=2)); ((slim=lim>>1))
+  print_pg
+  for((;;)){
+    get_key key
+    case $key in
+      q|$'\x1B') return 0;; # ESC
+      $'\x0A') return 1;; # ENTER
+      k|$'\x9BA') # UP
+        # Ignore 0th index
+        ((!idx)) && continue
+        # If cursor on first line of page, decrement indices and print page
+        # Else, remove highlight on current line before printing subsequent line
+        ((idx==offs)) && { ((offs--,idx--)); print_pg;} || {
+          printf ' \x9B5C%s\x1B8\x9BA\x1B7' "${ref[$((idx--))]}"
+          printf '\xAF\x9B5C\x9B7m%s\x1B8' "${ref[$idx]}"
+        }
+      ;;
+      j|$'\x9BB') # DOWN
+        # Ignore last index
+        ((idx+1==len)) && continue
+        # If cursor on last line of page, increment indices and print page
+        # Else, remove highlight on current line before printing subsequent line
+        ((idx+1==offs+lim)) && { ((offs++,idx++)); print_pg;} || {
+          printf ' \x9B5C%s\x1B8\x9BB\x1B7' "${ref[$((idx++))]}"
+          printf '\xAF\x9B5C\x9B7m%s\x1B8' "${ref[$idx]}"
+        }
+      ;;
+      $'\x02'|$'\x9B5~') # PG_UP/CTRL+B
+        ((offs=offs-lim>0?offs-lim:0)); ((idx=idx-lim>0?idx-lim:0))
+        print_pg
+      ;;
+      $'\x15') # HALF_PG_UP(CTRL+U)
+        ((idx=idx-slim>0?idx-slim:0)); ((idx<offs)) && ((offs=idx))
+        print_pg
+      ;;
+      $'\x06'|$'\x9B6~') # PG_DOWN/CTRL+F
+        ((offs+lim<len-lim)) && ((offs+=lim)) ||
+          ((offs=len>lim?len-lim:0))
+        ((idx=idx+lim<len?idx+lim:len-1))
+        print_pg
+      ;;
+      $'\x04') # HALF_PG_DOWN(CTRL+D)
+        ((idx=idx+slim<len?idx+slim:len-1))
+        ((idx+1>offs+lim)) && ((offs+=(idx-offs-lim+1)))
+        print_pg
+      ;;
+      $'\x20') # SPACE
+        [[ ${win_ctx[idxs]} == '-1' ]] && win_ctx[idxs]="$idx" || {
+          [[ ${win_ctx[idxs]} =~ (^${idx},|,${idx},|,${idx}$|^${idx}$) ]] && {
+            : "${BASH_REMATCH[0]}"
+            [[ ${_: -1} == ',' ]] && {
+              [[ ${_:: 1} == ',' ]] && : "${win_ctx[idxs]/$_/,}" ||
+                : "${win_ctx[idxs]#$_}"
+            } || : "${win_ctx[idxs]%$_}"
+            win_ctx[idxs]="$_"
+            [[ -z ${win_ctx[idxs]} ]] && win_ctx[idxs]='-1'
+            printf '\x9B3C \x1B8' && continue
+          } || win_ctx[idxs]+=",${idx}"
+        }
+        printf '\x9B3C\x04\x1B8'
+      ;;
+      $'\x9B1~') # HOME
+        offs=0; idx=0
+        print_pg
+      ;;
+      $'\x9B4~') # END
+        ((offs=len>lim?len-lim:0,idx=len-1))
+        print_pg
+      ;;
+    esac
+  }
+}
+
+wipe_window()
+{
+	local blanks y x lines columns
+	read -d '' _ y x lines columns _ _ <<< "${WINDOW_STACK[-1]//:/ }"
+	((lines-=2))
+	((columns-=2))
+	printf -v blanks '%*s' $((lines > columns ? lines : columns)) ''
+	: "${blanks::$lines}"
+	: "${_// /$'\x1B7'${blanks::$columns}$'\x1B8\x9BA'}"
+	printf '\x9B%s;%sH%s\x1B8' $((y + lines)) $((x + 1)) "$_"
+}
+
+
+process_config()
+{
+	local -l optkey
+	local -- optvals filename
+	local -- opt_cond=" ${LIG_OPT[*]::$(( ${#LIG_OPT[@]} - 3 ))} "
+	if [[ -f "${cachedir}/options.conf" ]]; then : "${cachedir}/options.conf"
+	elif [[ -f "${LIG_SRCDIR}/options.conf" ]]; then : "${LIG_SRCDIR}/options.conf"
+	else return; fi; filename="$_"
+	while read optkey; do case "$optkey" in
+	'[options]')
+		while IFS=$' \t\n=' read optkey optvals && [[ -n "$optkey" ]]; do
+			[[ "${opt_cond}" =~ " $optkey " ]]\
+				|| die "Bad config key: $optkey"
+		done;;
+	'[mirrors]')
+		:
+		;;
+	'[packages]')
+		:
+		;;
+	esac; done < "$filename"
+}
+
+ligmarch()
+{
+  trap "" EXIT
+	exit
+	for opt in "${LIG_OPT[@]}";{
+		case $opt in
+		save|install) :;;
+		*) mkdir $opt;;&
+		#mirrors)
+			#fetch_mirrorlist > ./mirrors/page_file;;
+		packages)
+			process_config;;
+		keymap)
+		esac
+	}
+}
+
+usage()
+{
+	read -d '' <<-EOF
+	Usage: bash ${0##*/} [options]
+
+	  Options:
+	  -c <config>    Use an alternate config for pre-loading options
+	  -a             Restrict drawing characters to ASCII (meant for display bugs)
+
+	  -h             Print this help message
+	EOF
+	printf %s "$REPLY"
+}
+
+#[[ -z $1 || $1 == '-h' ]];{
+#	echo $0
+#	usage
+#	exit
+#}
+#while getopts ':c:ah' flag; do
+#	case $flag in
+#	c) lig_config=$OPTARG;;
+#	a) :;;
+#	h) usage; exit;;
+#	:) die 'option requires an argument';;
+#	?) die 'invalid option';;
+#  esac
+#done
+
+
+align::left() {
+  local -i width=${1:?}
+  local -- str=${2:?}
+  local -i len=$((${#str} > width ? width : ${#str}))
+  local -i pad_right=$((width - len))
+  printf '%s%*s' "${str:0:len}" $pad_right ''
+}
+align::right() {
+  local -i width=${1:?}
+  local -- str=${2:?}
+  local -i len=$((${#str} > width ? width : ${#str}))
+  local -i offs=$((${#str} - len))
+  local -i pad_left=$((width - len))
+  printf '%*s%s' $pad_left '' "${str:offs:len}"
+}
+align::center() {
+  local -i width=${1:?}
+  local -- str=${2:?}
+  local -i len=$((${#str} > width ? width : ${#str}))
+  local -i offs=$(((${#str} - len) / 2))
+  local -i pad_left=$(((width - len) / 2))
+  local -i pad_right=$((width - len - pad_left))
+  printf '%*s%s%*s' $pad_left '' "${str:offs:len}" $pad_right ''
+}
+
+add_firstboot_options
+
+# vim: et ts=2 sw=2 ft=sh:
